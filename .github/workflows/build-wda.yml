@@ -31,25 +31,31 @@ jobs:
           fi
           xcodebuild -version
 
-      - name: Build WebDriverAgent Archive
+      - name: Build WebDriverAgent Runner
         run: |
-          xcodebuild archive \
+          xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
             -destination "generic/platform=iOS" \
-            -archivePath unsigned.xcarchive \
-            -configuration Release \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
+            -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Package WebDriverAgent IPA
         run: |
+          echo "=== Locating Build Products ==="
+          find build -name "*.app" || true
+          
           echo "=== Packaging WDA .app into IPA ==="
           mkdir -p Payload
           # Copy the compiled .app file to Payload directory
-          cp -r unsigned.xcarchive/Products/Applications/*.app Payload/
+          cp -r build/Build/Products/*-iphoneos/*.app Payload/ 2>/dev/null || cp -r build/Build/Products/*/*.app Payload/
+          
+          echo "=== Contents of Payload ==="
+          ls -la Payload
+          
           # Zip the Payload directory into a .ipa file
           zip -r WebDriverAgentRunner.ipa Payload/
           echo "=== Package Complete ==="
