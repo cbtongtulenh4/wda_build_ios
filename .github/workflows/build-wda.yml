@@ -17,122 +17,139 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Configure Xcode Version
+      - name: Setup Environment
+        id: setup
         run: |
-          echo "=== Available Xcode Versions ==="
+          echo "=== All Xcode Versions ==="
           ls -d /Applications/Xcode*.app 2>/dev/null || true
 
-          echo "=== Selecting Best Xcode Version ==="
-          # Prefer Xcode 15.x for iOS 17.5.1 compatibility
-          if [ -d "/Applications/Xcode_15.4.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
-          elif [ -d "/Applications/Xcode_15.3.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_15.3.app/Contents/Developer
-          elif [ -d "/Applications/Xcode_15.2.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_15.2.app/Contents/Developer
-          elif [ -d "/Applications/Xcode_16.0.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.0.app/Contents/Developer
-          fi
-          echo "=== Selected Xcode ==="
+          echo ""
+          echo "=== Current Default Xcode ==="
+          xcode-select -p
           xcodebuild -version
+
+          echo ""
           echo "=== Available SDKs ==="
-          xcodebuild -showsdks 2>/dev/null | grep -i iphone || true
-          echo "=== Available Simulators ==="
-          xcrun simctl list devices available | grep -i "iPhone" | head -10
+          xcodebuild -showsdks
 
-      - name: List Project Schemes
-        run: |
-          xcodebuild -project WebDriverAgent.xcodeproj -list
+          echo ""
+          echo "=== Available iPhone Simulators ==="
+          xcrun simctl list devices available | grep -i "iphone"
 
-      - name: Build WebDriverAgent Runner (Appium Official Method)
-        run: |
-          SCHEME="WebDriverAgentRunner"
-          DERIVED_DATA_PATH="./build"
+          echo ""
+          echo "=== Finding a Simulator to Use ==="
+          # Get the first available iPhone simulator UUID
+          SIM_UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          for runtime, devices in data.get('devices', {}).items():
+              if 'iOS' in runtime or 'iphone' in runtime.lower():
+                  for d in devices:
+                      if d.get('isAvailable') and 'iPhone' in d.get('name',''):
+                          print(d['udid'])
+                          sys.exit(0)
+          " 2>/dev/null)
 
-          echo "=== Building WDA with Appium official method ==="
-          echo "Scheme: $SCHEME"
-          echo "DerivedDataPath: $DERIVED_DATA_PATH"
-
-          # Use the exact same build command as Appium's Scripts/ci/build-real.sh
-          # but with a simulator destination (since no real device on CI runner)
-          xcodebuild clean build-for-testing \
-            -project WebDriverAgent.xcodeproj \
-            -derivedDataPath "$DERIVED_DATA_PATH" \
-            -scheme "$SCHEME" \
-            -destination "platform=iOS Simulator,name=iPhone 15" \
-            CODE_SIGNING_ALLOWED=NO \
-            ARCHS=arm64
-
-          echo "=== Build Complete ==="
-
-      - name: Locate and Package Build Products
-        run: |
-          DERIVED_DATA_PATH="./build"
-          SCHEME="WebDriverAgentRunner"
-
-          echo "=== All .app bundles found ==="
-          find "$DERIVED_DATA_PATH" -name "*.app" -type d
-
-          echo "=== Looking for Runner app ==="
-          RUNNER_APP=$(find "$DERIVED_DATA_PATH" -name "${SCHEME}-Runner.app" -type d | head -1)
-
-          if [ -z "$RUNNER_APP" ]; then
-            echo "ERROR: Could not find ${SCHEME}-Runner.app"
-            echo "=== Full build products tree ==="
-            find "$DERIVED_DATA_PATH/Build/Products" -maxdepth 3 -type d
+          if [ -z "$SIM_UDID" ]; then
+            echo "ERROR: No iPhone simulator found!"
+            xcrun simctl list devices available
             exit 1
           fi
 
-          echo "Found Runner app at: $RUNNER_APP"
-          echo "=== App contents ==="
-          ls -la "$RUNNER_APP"
+          SIM_NAME=$(xcrun simctl list devices available | grep "$SIM_UDID" | sed -E 's/^[[:space:]]*//' | sed -E 's/ \(.*//') 
+          echo "Selected Simulator: $SIM_NAME ($SIM_UDID)"
+          echo "SIM_UDID=$SIM_UDID" >> $GITHUB_OUTPUT
+          echo "SIM_NAME=$SIM_NAME" >> $GITHUB_OUTPUT
 
+      - name: List Project Info
+        run: |
+          echo "=== Project Schemes & Targets ==="
+          xcodebuild -project WebDriverAgent.xcodeproj -list
+
+      - name: Build WebDriverAgent Runner
+        run: |
+          SIM_UDID="${{ steps.setup.outputs.SIM_UDID }}"
+          echo "=== Building with Simulator ID: $SIM_UDID ==="
+
+          xcodebuild clean build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -destination "id=$SIM_UDID" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            2>&1 | tee build_output.log
+
+      - name: Upload Build Log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-log
+          path: build_output.log
+
+      - name: Locate and Package Build Products
+        run: |
+          SCHEME="WebDriverAgentRunner"
+
+          echo "=== All .app bundles ==="
+          find build -name "*.app" -type d
+
+          echo ""
+          echo "=== Finding Runner App ==="
+          RUNNER_APP=$(find build -name "${SCHEME}-Runner.app" -type d | head -1)
+
+          if [ -z "$RUNNER_APP" ]; then
+            echo "ERROR: ${SCHEME}-Runner.app not found!"
+            find build/Build/Products -maxdepth 3 -type d 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Found: $RUNNER_APP"
           WD=$(dirname "$RUNNER_APP")
           APP_NAME=$(basename "$RUNNER_APP")
-          echo "Working directory: $WD"
-          echo "App name: $APP_NAME"
 
-          # Remove unnecessary XCTest frameworks (per Appium's build-real.sh)
-          # These are not needed for real device as iOS provides them locally
-          echo "=== Removing unnecessary frameworks ==="
+          # Show binary architecture
+          echo ""
+          echo "=== Binary Info ==="
+          MAIN_BIN=$(find "$RUNNER_APP" -name "${SCHEME}-Runner" -not -path "*.dSYM*" -type f | head -1)
+          if [ -n "$MAIN_BIN" ]; then
+            file "$MAIN_BIN"
+            lipo -info "$MAIN_BIN" 2>/dev/null || true
+          fi
+
+          # Remove unnecessary XCTest frameworks (per Appium build-real.sh)
+          echo ""
+          echo "=== Stripping unnecessary frameworks ==="
           find "$RUNNER_APP/Frameworks" -name "XC*.framework" -type d -exec rm -rf {} + 2>/dev/null || true
           rm -rf "$RUNNER_APP/Frameworks/Testing.framework" 2>/dev/null || true
           rm -f "$RUNNER_APP/Frameworks/libXCTestSwiftSupport.dylib" 2>/dev/null || true
-          echo "Remaining frameworks:"
-          ls "$RUNNER_APP/Frameworks/" 2>/dev/null || echo "(none)"
 
-          # Create ZIP of the .app (for direct use)
-          echo "=== Creating ZIP package ==="
+          # Create ZIP
+          echo ""
+          echo "=== Creating ZIP ==="
           cd "$WD"
           zip -qr "$GITHUB_WORKSPACE/WebDriverAgentRunner-Runner.zip" "$APP_NAME"
           cd "$GITHUB_WORKSPACE"
 
-          # Create IPA (Payload structure)
-          echo "=== Creating IPA package ==="
+          # Create IPA
+          echo "=== Creating IPA ==="
           mkdir -p Payload
           cp -r "$RUNNER_APP" Payload/
           zip -qr WebDriverAgentRunner.ipa Payload/
 
-          echo "=== Package Summary ==="
+          echo ""
+          echo "=== Output Files ==="
           ls -lh WebDriverAgentRunner-Runner.zip
           ls -lh WebDriverAgentRunner.ipa
 
-          # Show architecture info
-          echo "=== Binary Architecture ==="
-          MAIN_BINARY=$(find "$RUNNER_APP" -name "${SCHEME}-Runner" -type f | head -1)
-          if [ -n "$MAIN_BINARY" ]; then
-            file "$MAIN_BINARY"
-            lipo -info "$MAIN_BINARY" 2>/dev/null || true
-          fi
-
-      - name: Upload ZIP Artifact
+      - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
           name: WebDriverAgentRunner-Runner-ZIP
           path: WebDriverAgentRunner-Runner.zip
           if-no-files-found: error
 
-      - name: Upload IPA Artifact
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: WebDriverAgentRunner-IPA
