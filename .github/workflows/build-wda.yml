@@ -1,0 +1,63 @@
+name: Build WebDriverAgent
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-wda:
+    name: Build WebDriverAgent Runner IPA (Unsigned)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure Xcode Version
+        run: |
+          echo "=== Available Xcode Versions ==="
+          ls -d /Applications/Xcode*.app || true
+          
+          echo "=== Selecting Xcode Version ==="
+          if [ -d "/Applications/Xcode_15.4.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          elif [ -d "/Applications/Xcode_16.0.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.0.app/Contents/Developer
+          elif [ -d "/Applications/Xcode_15.2.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_15.2.app/Contents/Developer
+          fi
+          xcodebuild -version
+
+      - name: Build WebDriverAgent Archive
+        run: |
+          xcodebuild archive \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -destination "generic/platform=iOS" \
+            -archivePath unsigned.xcarchive \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+      - name: Package WebDriverAgent IPA
+        run: |
+          echo "=== Packaging WDA .app into IPA ==="
+          mkdir -p Payload
+          # Copy the compiled .app file to Payload directory
+          cp -r unsigned.xcarchive/Products/Applications/*.app Payload/
+          # Zip the Payload directory into a .ipa file
+          zip -r WebDriverAgentRunner.ipa Payload/
+          echo "=== Package Complete ==="
+          ls -la WebDriverAgentRunner.ipa
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgentRunner-IPA
+          path: WebDriverAgentRunner.ipa
+          if-no-files-found: error
